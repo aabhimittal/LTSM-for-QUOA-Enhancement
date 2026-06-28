@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Model checkpoints / generated artifacts
+*.pt
+*.pth
+*.ckpt
+
+# Generated figures (the demo writes examples/results.png)
+examples/results.png
+*.png
+!docs/**/*.png
+
+# OS
+.DS_Store

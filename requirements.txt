@@ -1,0 +1,14 @@
+# Core scientific stack
+numpy>=1.23
+scipy>=1.9
+matplotlib>=3.6
+
+# Deep learning
+torch>=2.0
+
+# Quantum computing (faithful backend used by the quantum kernel and QAOA)
+qiskit>=1.0
+qiskit-aer>=0.13
+
+# Testing
+pytest>=7.0
