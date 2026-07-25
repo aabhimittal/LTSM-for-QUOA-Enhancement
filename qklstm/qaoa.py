@@ -25,6 +25,68 @@ from scipy.optimize import minimize
 Edge = Tuple[int, int]
 
 
+# Periods of the QAOA angles for unweighted MaxCut (verified numerically in
+# tests/test_symmetry.py).  ``exp(-i*gamma*sum Z_i Z_j)`` has an integer spectrum
+# so gamma is pi-periodic; the mixer is pi-periodic on its own, and the extra
+# factor of two comes from X^(x)n, which commutes with the cost Hamiltonian and
+# stabilises |+>^n, making beta pi/2-periodic.
+GAMMA_PERIOD = np.pi
+BETA_PERIOD = np.pi / 2
+
+
+def canonicalize_qaoa_params(params: np.ndarray, p: int) -> np.ndarray:
+    """Map QAOA angles onto a canonical representative of their symmetry orbit.
+
+    A MaxCut QAOA objective is invariant under
+
+    * ``gamma_l -> gamma_l + pi``           (integer cost spectrum),
+    * ``beta_l  -> beta_l + pi/2``          (spin-flip symmetry ``X^(x)n``),
+    * ``(gamma, beta) -> (-gamma, -beta)``  (time reversal; applies jointly to
+      every layer because the state is real).
+
+    A classical optimiser started from a random point therefore returns angles
+    scattered over many equivalent branches.  Regressing on such labels is
+    ill-posed -- the mean of a multimodal target is not itself a good solution.
+    Folding every label into the domain ``gamma in [0, pi)``, ``beta in [0, pi/4]``
+    makes the regression target single-valued without changing any objective
+    value.
+    """
+    gamma = np.asarray(params[:p], dtype=float) % GAMMA_PERIOD
+    beta = np.asarray(params[p:], dtype=float) % BETA_PERIOD
+
+    # Time reversal is a joint operation across all layers, so the decision is
+    # taken once (using the first layer) and applied to the whole vector.
+    if len(beta) and beta[0] > BETA_PERIOD / 2:
+        gamma = (-gamma) % GAMMA_PERIOD
+        beta = (-beta) % BETA_PERIOD
+
+    return np.concatenate([gamma, beta])
+
+
+def brute_force_maxcut(
+    problem_graph: List[Edge], n_nodes: int
+) -> Tuple[int, str]:
+    """Exactly solve MaxCut by enumerating all ``2^n`` bipartitions.
+
+    Returns ``(best_cut, best_bitstring)``.  This is exponential and intended
+    only for the small instances used here (``n_nodes`` up to ~16); it provides
+    the denominator ``C_max`` for the **approximation ratio**
+    ``<C> / C_max``, which is the standard way to compare QAOA quality across
+    problems of different sizes.
+    """
+    if n_nodes < 1:
+        raise ValueError("n_nodes must be >= 1")
+
+    best_cut, best_bits = -1, "0" * n_nodes
+    for idx in range(2 ** n_nodes):
+        bits = format(idx, f"0{n_nodes}b")
+        cut = sum(1 for i, j in problem_graph if bits[i] != bits[j])
+        if cut > best_cut:
+            best_cut, best_bits = cut, bits
+
+    return best_cut, best_bits
+
+
 class QAOA:
     """QAOA for MaxCut via exact statevector simulation.
 
@@ -97,16 +159,20 @@ class QAOA:
         problem_graph: List[Edge],
         initial_params: Optional[np.ndarray] = None,
         maxiter: int = 100,
+        n_restarts: int = 1,
     ) -> Tuple[np.ndarray, float]:
         """Optimise ``(gamma, beta)`` with COBYLA to *maximise* the cut.
 
         Returns ``(optimal_params, optimal_value)`` where ``optimal_params`` is a
         length-``2p`` vector laid out as ``[gamma_1..gamma_p, beta_1..beta_p]``.
+
+        ``n_restarts`` runs the optimiser from several random starts and keeps the
+        best result.  The QAOA landscape is non-convex, so a single COBYLA run
+        regularly settles in a local optimum; restarts matter when the output is
+        used as a *training label*, since inconsistent labels are unlearnable.
+        Ignored when ``initial_params`` is supplied (that is a deliberate warm
+        start, so it is honoured exactly).
         """
-        if initial_params is None:
-            params = np.random.uniform(0, 2 * np.pi, 2 * self.p)
-        else:
-            params = np.asarray(initial_params, dtype=float).copy()
 
         def objective(flat_params: np.ndarray) -> float:
             gamma = flat_params[: self.p]
@@ -114,7 +180,20 @@ class QAOA:
             # Negate because scipy minimises and we want to maximise the cut.
             return -self.compute_expectation(gamma, beta, problem_graph)
 
-        result = minimize(
-            objective, params, method="COBYLA", options={"maxiter": maxiter}
-        )
-        return result.x, float(-result.fun)
+        if initial_params is not None:
+            starts = [np.asarray(initial_params, dtype=float).copy()]
+        else:
+            starts = [
+                np.random.uniform(0, 2 * np.pi, 2 * self.p)
+                for _ in range(max(1, n_restarts))
+            ]
+
+        best_params, best_value = None, -np.inf
+        for start in starts:
+            result = minimize(
+                objective, start, method="COBYLA", options={"maxiter": maxiter}
+            )
+            if -result.fun > best_value:
+                best_params, best_value = result.x, float(-result.fun)
+
+        return best_params, best_value

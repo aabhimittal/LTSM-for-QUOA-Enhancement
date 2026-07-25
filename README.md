@@ -89,19 +89,107 @@ python examples/demo_maxcut.py --no-quantum   # classical LSTM ablation
 
 ---
 
+## Cross-size transfer: train small, predict large
+
+The single-size optimizer encodes a graph as `[degree_0 … degree_{n-1}, density,
+n_edges]`, so `input_dim = n_qubits + 2`. That has two costs: the encoding is **not
+permutation-invariant** (relabeling vertices changes the vector), and it is **welded to
+one problem size** — a model trained on 6-node graphs has the wrong tensor shape for a
+9-node graph. Every size needs retraining, which defeats the "train once, predict
+instantly" premise.
+
+`SpectralEncoder` fixes both. It describes a graph by its **normalized-Laplacian
+spectrum** plus scale-free structural statistics:
+
+- `L = I − D^{-1/2} A D^{-1/2}` has all eigenvalues in `[0, 2]` **for any graph size** —
+  that bound is what makes spectra comparable across sizes (the combinatorial Laplacian's
+  spectrum grows with degree, so it would not work).
+- The spectrum is summarized by 11 fixed **quantiles**, giving constant length for any `n`.
+- Degree moments are normalized by `n−1`; clustering, triangle density, assortativity and
+  edge density are already scale-free.
+
+Every feature is a function of the *unordered* spectrum or a normalized aggregate, so the
+encoding is permutation-invariant by construction — verified to ~1e-17 in the tests.
+
+```python
+from qklstm import CrossSizeQKLSTMOptimizer
+
+opt = CrossSizeQKLSTMOptimizer(train_sizes=(4, 5, 6), qaoa_depth=1)
+opt.train(n_problems_per_size=15, n_epochs=40)
+
+opt.evaluate_transfer(test_sizes=[4, 5, 6, 7, 8, 9])   # 7-9 never seen
+```
+
+```bash
+python examples/demo_cross_size.py           # train {4,5,6} -> test {4..9}
+python examples/demo_cross_size.py --quick   # fast run
+```
+
+### Measured results
+
+Mean **approximation ratio** (expected cut / exact optimum, so values are comparable
+across sizes), 5 random graphs per size, `p = 1`, classical kernel:
+
+| nodes | in training? | random | QK-LSTM predicted | + refinement |
+| ---: | :---: | ---: | ---: | ---: |
+| 4 | yes | 0.580 | 0.794 | 0.820 |
+| 5 | yes | 0.786 | 0.835 | 0.889 |
+| 6 | yes | 0.661 | 0.816 | 0.820 |
+| **7** | **NEW** | 0.625 | **0.788** | 0.791 |
+| **8** | **NEW** | 0.553 | **0.784** | 0.788 |
+| **9** | **NEW** | 0.550 | **0.785** | 0.790 |
+
+Mean gain over random on unseen sizes: **+0.21**. Prediction quality stays essentially
+flat (0.788 / 0.784 / 0.785) as graphs grow past the training range — the transfer does
+not decay with size. "Predicted" is a **single forward pass with zero circuit
+optimization**; refinement adds only ~0.005, meaning the warm start already lands close
+to the optimum COBYLA converges to.
+
+### Why this needed a symmetry fix
+
+A first implementation scored **worse than random** (−0.08). The cause was not the
+encoding but the *labels*: the QAOA objective is invariant under
+
+| symmetry | consequence |
+| --- | --- |
+| `γ → γ + π` | integer cost spectrum |
+| `β → β + π/2` | `X^⊗n` commutes with the cost and fixes `|+⟩^ⁿ` |
+| `(γ, β) → (−γ, −β)` | time reversal (the state is real) |
+
+so COBYLA returns optima scattered across equivalent branches (label std ≈ 1.8 rad).
+Regressing with MSE onto a multimodal target pulls the model toward the *mean* of
+several valid solutions, which is itself not a solution. Three changes fix it:
+
+1. **`canonicalize_qaoa_params`** folds every label onto one representative of its
+   symmetry orbit (`γ ∈ [0, π)`, `β ∈ [0, π/4]`). Label scatter drops to *exactly zero*.
+2. **Multi-restart labelling** (`QAOA.optimize(n_restarts=…)`) so labels are near-global
+   rather than whichever local optimum was found first.
+3. **`PeriodicAngleLoss`** — `1 − cos(2π·Δ/period)` — which treats `γ = 0.01` and
+   `γ = π − 0.01` as the near-identical circuits they are, instead of maximally distant.
+
+All three symmetries are verified to machine precision in `tests/test_symmetry.py`.
+
+---
+
 ## Project structure
 
 ```
 qklstm/
 ├── quantum_kernel.py   # ZZ-feature-map quantum kernel: K_Q(x1,x2)=|<φ(x1)|φ(x2)>|²
 ├── qklstm_model.py     # QuantumKernelLSTM: quantum-kernel fusion + LSTM + dense head
-├── qaoa.py             # QAOA MaxCut solver (circuit, expectation, COBYLA optimize)
-├── optimizer.py        # QKLSTMQAOAOptimizer: encode / generate / train / predict / solve
+├── qaoa.py             # QAOA MaxCut solver + symmetry canonicalization + exact optimum
+├── encoding.py         # DegreeEncoder (original) and SpectralEncoder (invariant)
+├── optimizer.py        # QKLSTMQAOAOptimizer: single-size meta-optimizer
+├── cross_size.py       # CrossSizeQKLSTMOptimizer + PeriodicAngleLoss
 └── visualization.py    # 4-panel results figure (training, params, comparison, kernel)
 
-examples/demo_maxcut.py # end-to-end demonstration with CLI flags
-tests/test_smoke.py     # fast tests for both quantum and classical paths
-docs/MATH.md            # step-by-step mathematical deep-dive
+examples/demo_maxcut.py      # single-size end-to-end demonstration
+examples/demo_cross_size.py  # train on small graphs, transfer to larger ones
+tests/test_smoke.py          # core pipeline, quantum and classical paths
+tests/test_encoding.py       # permutation invariance, size-agnosticism
+tests/test_symmetry.py       # QAOA symmetries, canonicalization, periodic loss
+tests/test_cross_size.py     # transfer end-to-end + backward compatibility
+docs/MATH.md                 # step-by-step mathematical deep-dive
 ```
 
 ---
@@ -145,9 +233,13 @@ training/inference pipeline.
 
 ## Roadmap
 
-- Scale to larger problems (>10 qubits) and deeper QAOA.
-- Other problem families (TSP, portfolio optimization).
-- Alternative quantum-kernel feature maps.
+- Learned-optimizer mode: feed real optimization trajectories (γ, β, cost) through the
+  LSTM so the recurrence models the *update rule* rather than a static encoding.
+- Generalize the backend from unweighted MaxCut to arbitrary Ising/QUBO problems
+  (weighted MaxCut, number partitioning, portfolio optimization).
+- Classical-kernel ablation (RBF vs quantum) plus kernel caching, to quantify how much
+  the quantum kernel actually contributes.
+- Depth extrapolation with INTERP/FOURIER baselines (`p → p+1` parameter transfer).
 - Deployment on real quantum hardware via IBM Quantum.
 
 ## License

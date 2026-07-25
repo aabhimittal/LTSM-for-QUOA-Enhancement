@@ -202,7 +202,95 @@ QAOA steps).
 
 ---
 
-## 7. Complexity & intuition
+## 7. Spectral encoding & cross-size transfer — `qklstm/encoding.py`
+
+### 7.1 Why the degree encoding blocks transfer
+
+The original encoding `[deg_0, …, deg_{n-1}, density, |E|]` has length `n + 2`. Two
+problems follow. Relabeling vertices by a permutation `σ` permutes the degree block, so
+the same graph maps to different vectors — the network must spend capacity learning an
+invariance. And the length depends on `n`, so a model trained at one size cannot even be
+*evaluated* at another.
+
+### 7.2 The normalized Laplacian
+
+```
+L = I − D^{-1/2} A D^{-1/2}
+```
+
+Its spectrum satisfies `0 = λ₁ ≤ λ₂ ≤ … ≤ λₙ ≤ 2` for **every** graph, independent of
+size. This bound is the crucial property: it makes spectra of a 4-node and a 40-node
+graph directly comparable. The combinatorial Laplacian `L = D − A` has eigenvalues that
+grow with the degrees and would not be comparable across sizes.
+
+Useful facts used as features:
+
+- the multiplicity of eigenvalue `0` equals the number of connected components;
+- `λ₂` (algebraic connectivity) measures how well connected the graph is;
+- eigenvalues are invariant under vertex relabeling, since `L → P L Pᵀ` is a similarity
+  transform and similar matrices share a spectrum. **This is the source of permutation
+  invariance** — no learning required.
+
+Isolated vertices use the convention `D^{-1/2} → 0`.
+
+### 7.3 Fixed-length summary
+
+The spectrum has `n` values, which varies. To obtain a constant-length descriptor we take
+**quantiles at fixed positions** `q = 0.0, 0.1, …, 1.0`, giving 11 numbers that summarize
+the shape of the spectral density for any `n`. Adding mean, std, `λ₂` and the zero-
+eigenvalue fraction, plus degree moments normalized by `n − 1` and the scale-free
+structural statistics (density, clustering, triangle density, assortativity), yields a
+**24-dimensional** vector (25 with the optional `log(n)/10` size hint) for every graph.
+
+Since every entry is a function of the unordered spectrum or a normalized aggregate over
+vertices/edges, the encoding is permutation-invariant by construction.
+
+---
+
+## 8. QAOA parameter symmetries — `qklstm/qaoa.py`
+
+Learning to predict `(γ, β)` only works if the targets are consistent. The MaxCut QAOA
+objective `F(γ, β)` is invariant under three transformations:
+
+| symmetry | why |
+| --- | --- |
+| `γ_l → γ_l + π` | `H_C` has an integer spectrum, so `e^{-iγH_C}` is `π`-periodic up to a global phase |
+| `β_l → β_l + π/2` | `e^{-i(π/2)ΣX} ∝ X^{⊗n}`, which commutes with `H_C` and satisfies `X^{⊗n}|+⟩^{⊗n} = |+⟩^{⊗n}` |
+| `(γ, β) → (−γ, −β)` | `H_C` is real-diagonal and `|+⟩^{⊗n}` is real, so `F` is invariant under complex conjugation (applies jointly to all layers) |
+
+Consequently the optimal angles form an **orbit** of equivalent solutions. A classical
+optimizer started at a random point returns an arbitrary member of that orbit, so labels
+gathered across problems have standard deviation ≈ 1.8 rad even when every one of them is
+optimal. Minimizing `‖θ̂ − θ*‖²` against such targets drives the prediction toward the
+*centroid* of several valid solutions, which is not itself a solution — empirically this
+scored *below random*.
+
+**Canonicalization.** `canonicalize_qaoa_params` folds each label onto one representative:
+
+```
+γ ← γ mod π
+β ← β mod π/2
+if β₁ > π/4:  (γ, β) ← (−γ mod π, −β mod π/2)      # joint time reversal
+```
+
+giving the fundamental domain `γ ∈ [0, π)`, `β ∈ [0, π/4]`. This changes no objective
+value (verified to ~5e-15) and collapses label scatter to exactly zero.
+
+**Periodic loss.** Even canonicalized, angles live on a circle: `γ = 0.01` and
+`γ = π − 0.01` are nearly the same circuit but maximally far apart in MSE. The training
+objective is therefore
+
+```
+L = mean[ 1 − cos(2π·Δγ / π) ] + mean[ 1 − cos(2π·Δβ / (π/2)) ]
+  = mean[ 1 − cos(2Δγ) ] + mean[ 1 − cos(4Δβ) ]
+```
+
+which vanishes exactly when the prediction matches the target up to a full period, and is
+smooth and differentiable everywhere.
+
+---
+
+## 9. Complexity & intuition
 
 - **Classical QAOA per problem:** `O(I · 2ⁿ)` for `I` optimization iterations.
 - **QK-LSTM inference:** one forward pass + kernel evals — no per-problem

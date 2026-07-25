@@ -9,20 +9,31 @@ Public API
 - :class:`QuantumKernel`        -- ZZ-feature-map quantum kernel.
 - :class:`QuantumKernelLSTM`    -- LSTM with quantum-kernel feature fusion.
 - :class:`QAOA`                 -- MaxCut QAOA solver.
-- :class:`QKLSTMQAOAOptimizer`  -- end-to-end meta-optimiser.
+- :func:`brute_force_maxcut`    -- exact optimum, for approximation ratios.
+- :class:`QKLSTMQAOAOptimizer`  -- end-to-end meta-optimiser (single size).
+- :class:`SpectralEncoder`      -- permutation-invariant, size-agnostic encoding.
+- :class:`CrossSizeQKLSTMOptimizer` -- one model transferring across sizes.
 - :func:`visualize_results`     -- 4-panel results figure.
 """
 
 from .quantum_kernel import QuantumKernel
-from .qaoa import QAOA
+from .qaoa import QAOA, brute_force_maxcut, canonicalize_qaoa_params
 from .qklstm_model import QuantumKernelLSTM
 from .optimizer import QKLSTMQAOAOptimizer
+from .encoding import DegreeEncoder, ProblemEncoder, SpectralEncoder
+from .cross_size import CrossSizeQKLSTMOptimizer
 
 __all__ = [
     "QuantumKernel",
     "QAOA",
+    "brute_force_maxcut",
+    "canonicalize_qaoa_params",
     "QuantumKernelLSTM",
     "QKLSTMQAOAOptimizer",
+    "ProblemEncoder",
+    "DegreeEncoder",
+    "SpectralEncoder",
+    "CrossSizeQKLSTMOptimizer",
     "visualize_results",
 ]
 
