@@ -20,12 +20,24 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .encoding import DegreeEncoder, ProblemEncoder
 from .qaoa import QAOA, Edge
 from .qklstm_model import QuantumKernelLSTM
 
 
 class QKLSTMQAOAOptimizer:
-    """Train a QK-LSTM to predict QAOA parameters for MaxCut problems."""
+    """Train a QK-LSTM to predict QAOA parameters for MaxCut problems.
+
+    Parameters
+    ----------
+    encoder:
+        Strategy for turning a graph into a feature vector.  Defaults to
+        :class:`~qklstm.encoding.DegreeEncoder`, which reproduces the original
+        ``[degrees..., density, n_edges]`` encoding exactly.  Pass a
+        :class:`~qklstm.encoding.SpectralEncoder` for permutation-invariant
+        features -- or use :class:`~qklstm.cross_size.CrossSizeQKLSTMOptimizer`
+        when you want one model to span several problem sizes.
+    """
 
     def __init__(
         self,
@@ -36,6 +48,7 @@ class QKLSTMQAOAOptimizer:
         lr: float = 1e-3,
         seed: Optional[int] = 42,
         device: Optional[str] = None,
+        encoder: Optional[ProblemEncoder] = None,
     ):
         self.n_qubits = n_qubits
         self.qaoa_depth = qaoa_depth
@@ -50,9 +63,12 @@ class QKLSTMQAOAOptimizer:
 
         self.qaoa = QAOA(n_qubits=n_qubits, p=qaoa_depth)
 
-        # Input  : problem encoding (degree sequence + edge density + #edges).
+        # Default encoder reproduces the original behaviour exactly.
+        self.encoder = encoder if encoder is not None else DegreeEncoder(n_qubits)
+
+        # Input  : problem encoding (encoder-defined).
         # Output : 2 * depth QAOA parameters [gamma..., beta...].
-        input_dim = n_qubits + 2
+        input_dim = self.encoder.dim
         output_dim = 2 * qaoa_depth
 
         self.model = QuantumKernelLSTM(
@@ -71,21 +87,13 @@ class QKLSTMQAOAOptimizer:
     # Problem encoding
     # ------------------------------------------------------------------ #
     def encode_problem(self, problem_graph: List[Edge]) -> np.ndarray:
-        """Encode a graph as a fixed-length feature vector.
+        """Encode a graph as a fixed-length feature vector via ``self.encoder``.
 
-        Features = ``[degree_0, ..., degree_{n-1}, edge_density, n_edges]`` with
-        length ``n_qubits + 2``.
+        With the default :class:`~qklstm.encoding.DegreeEncoder` this returns
+        ``[degree_0, ..., degree_{n-1}, edge_density, n_edges]`` of length
+        ``n_qubits + 2``, unchanged from earlier versions.
         """
-        adj = np.zeros((self.n_qubits, self.n_qubits))
-        for i, j in problem_graph:
-            adj[i, j] = adj[j, i] = 1.0
-
-        degree = adj.sum(axis=1)
-        max_edges = self.n_qubits * (self.n_qubits - 1) / 2
-        edge_density = len(problem_graph) / max_edges if max_edges else 0.0
-
-        features = np.concatenate([degree, [edge_density, float(len(problem_graph))]])
-        return features[: self.n_qubits + 2].astype(np.float32)
+        return self.encoder.encode(problem_graph, self.n_qubits)
 
     # ------------------------------------------------------------------ #
     # Random problem generation
